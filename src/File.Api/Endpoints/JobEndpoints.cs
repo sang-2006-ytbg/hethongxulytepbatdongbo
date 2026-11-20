@@ -1,7 +1,10 @@
 using File.Api.Data;
 using File.Api.Data.Entities;
+using File.Api.Hubs;
+using Microsoft.AspNetCore.SignalR;
 using Shared.Contracts.Constants;
 using Shared.Contracts.Dtos;
+using Shared.Contracts.Messaging;
 
 namespace File.Api.Endpoints;
 
@@ -29,9 +32,10 @@ public static class JobEndpoints
     // ─── Handlers ────────────────────────────────────────────────────────────
 
     static IResult CreateJob(
-        CreateJobRequest request,
-        IAppStore        store,
-        ILogger<Program> logger)
+        CreateJobRequest                   request,
+        IAppStore                          store,
+        IHubContext<JobStatusHub>          hubContext,
+        ILogger<Program>                   logger)
     {
         // Kiểm tra tệp tồn tại
         var file = store.GetFile(request.FileId);
@@ -56,12 +60,13 @@ public static class JobEndpoints
             CorrelationId = correlationId,
         });
 
-        // Buổi 2: Chưa có RabbitMQ → chỉ lưu DB, trạng thái giữ Pending
-        // Buổi 6+ sẽ gửi JobQueuedMessage vào file_processing_queue tại đây
-
         logger.LogInformation(
             "[Job] Đã tạo: {JobId} | File: {FileId} | Loại: {Type} | CorrelationId: {CorrId}",
             job.Id, job.FileId, job.JobType, job.CorrelationId);
+
+        // 3.3.1: Khởi động tác vụ nền mô phỏng xử lý → đẩy trạng thái qua SignalR
+        // Trong hệ thống thật, phần này sẽ do Worker Service xử lý (các buổi sau).
+        _ = SimulateProcessingAsync(job.Id, store, hubContext, logger);
 
         return Results.Created($"/jobs/{job.Id}", ToDto(job, file.OriginalFileName));
     }
@@ -100,6 +105,43 @@ public static class JobEndpoints
 
         var file = store.GetFile(job.FileId);
         return Results.Ok(ToDto(job, file?.OriginalFileName ?? string.Empty));
+    }
+
+    // ─── Mô phỏng xử lý bất đồng bộ (Buổi 3) ────────────────────────────────
+    // Hàm này lần lượt chuyển trạng thái job và đẩy thông báo SignalR tới nhóm.
+    // Trong hệ thống thực tế, luồng này sẽ được thay bằng Worker Service + hàng đợi.
+
+    static async Task SimulateProcessingAsync(
+        Guid                      jobId,
+        IAppStore                 store,
+        IHubContext<JobStatusHub> hubContext,
+        ILogger                   logger)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(1));
+        await UpdateStatusAsync(jobId, JobStatuses.Processing, store, hubContext, logger);
+
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        await UpdateStatusAsync(jobId, JobStatuses.Completed, store, hubContext, logger);
+    }
+
+    static async Task UpdateStatusAsync(
+        Guid                      jobId,
+        string                    status,
+        IAppStore                 store,
+        IHubContext<JobStatusHub> hubContext,
+        ILogger                   logger)
+    {
+        store.UpdateJobStatus(jobId, status);
+
+        var message = new JobStatusMessage(jobId, status, DateTimeOffset.UtcNow);
+
+        // Gửi thông báo tới đúng nhóm máy khách đang theo dõi job này
+        await hubContext.Clients
+            .Group(JobGroups.ForJob(jobId))
+            .SendAsync("JobStatusChanged", message);
+
+        logger.LogInformation(
+            "[SignalR] Đã đẩy trạng thái: {JobId} → {Status}", jobId, status);
     }
 
     // ─── Mapper ──────────────────────────────────────────────────────────────
