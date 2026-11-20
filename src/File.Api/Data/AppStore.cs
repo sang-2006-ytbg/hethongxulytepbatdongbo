@@ -18,6 +18,9 @@ public interface IAppStore
     JobEntity? GetJob(Guid id);
     IReadOnlyList<JobEntity> GetAllJobs();
     IReadOnlyList<JobEntity> GetJobsByFileId(Guid fileId);
+
+    /// <summary>Cập nhật trạng thái job — dùng bởi luồng mô phỏng SignalR (Buổi 3).</summary>
+    JobEntity? UpdateJobStatus(Guid id, string status);
 }
 
 public sealed class InMemoryAppStore : IAppStore
@@ -61,5 +64,17 @@ public sealed class InMemoryAppStore : IAppStore
     public IReadOnlyList<JobEntity> GetJobsByFileId(Guid fileId)
     {
         lock (_lock) return _jobs.Where(j => j.FileId == fileId).ToList();
+    }
+
+    public JobEntity? UpdateJobStatus(Guid id, string status)
+    {
+        lock (_lock)
+        {
+            var job = _jobs.FirstOrDefault(j => j.Id == id);
+            if (job is null) return null;
+
+            job.Status = status;
+            return job;
+        }
     }
 }
