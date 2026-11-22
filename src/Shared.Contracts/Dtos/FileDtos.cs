@@ -10,3 +10,4 @@ public sealed record FileDto(
     string? LatestJobStatus,
     bool HasResult
 );
+

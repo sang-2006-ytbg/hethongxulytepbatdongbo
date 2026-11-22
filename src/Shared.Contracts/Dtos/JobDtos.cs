@@ -20,3 +20,4 @@ public sealed record JobDto(
     DateTimeOffset? CompletedAt,
     string? DownloadUrl
 );
+
